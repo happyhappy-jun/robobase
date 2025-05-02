@@ -99,9 +99,7 @@ class ImageEncoderACT(RoboBaseModule):
         """Return output shapes excluding the batch dimension."""
         if self._output_shape is None:
             bs = 1
-            x = torch.randn((bs,) + self._input_shape).to(
-                next(self.backbone.parameters()).device
-            )
+            x = torch.randn((bs,) + self._input_shape).to(next(self.backbone.parameters()).device)
             task_emb = None
             if self.use_lang_cond:
                 task_emb = torch.randn((bs, self.backbone.num_channels)).to(
@@ -137,6 +135,7 @@ class ImageEncoderACT(RoboBaseModule):
             cur_x = x[:, cam_id].reshape(-1, 3, *self._input_shape[2:])
 
             # feat: (b*fs, c, h, w) -> (b*fs, feat_dim, 3, 3)
+            # import pdb; pdb.set_trace()
             if self.use_lang_cond:
                 feat, pos = self.backbone(cur_x, task_emb=task_emb)
             else:

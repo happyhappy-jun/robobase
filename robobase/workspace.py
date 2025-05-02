@@ -490,12 +490,14 @@ class Workspace:
             self.env_factory.load_demos_into_replay(
                 self.cfg,
                 self.replay_buffer,
-                is_demo_buffer=True if self.cfg.is_imitation_learning else False,
+                # is_demo_buffer=True if self.cfg.is_imitation_learning else False,
             )
             if self.use_demo_replay:
                 # Load demos to the dedicated demo_replay_buffer
                 self.env_factory.load_demos_into_replay(
-                    self.cfg, self.demo_replay_buffer, is_demo_buffer=True
+                    self.cfg, 
+                    self.demo_replay_buffer, 
+                    # is_demo_buffer=True
                 )
 
         if self.cfg.replay_size_before_train > 0:

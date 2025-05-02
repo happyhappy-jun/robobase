@@ -6,8 +6,11 @@ Backbone modules.
 import torch
 import torchvision
 from torch import nn
+from torch.nn import functional as F
 from torchvision.models._utils import IntermediateLayerGetter
-from typing import List, Mapping, Optional, Any
+from typing import List, Mapping, Optional, Any, OrderedDict
+import timm
+from timm.models.vision_transformer import VisionTransformer
 
 from robobase.models.act.utils.resnet_film import resnet18 as resnet18_film
 from robobase.models.act.utils.misc import NestedTensor, is_main_process
@@ -124,6 +127,80 @@ class Backbone(BackboneBase):
         super().__init__(backbone, train_backbone, num_channels, return_interm_layers)
 
 
+class ViTBackbone(nn.Module):
+    def __init__(
+        self,
+        name: str,
+        train_backbone: bool,
+        return_interm_layers: bool,
+        dilation: bool,
+    ):
+        super().__init__()
+        # Stops "urllib.error.URLError: ... unable to get local issuer certificate"
+        ssl._create_default_https_context = ssl._create_unverified_context
+        
+        self.backbone = timm.create_model(
+            name,
+            pretrained=is_main_process(),
+            num_classes=0  # Remove classification head
+        )
+        
+        # Freeze parameters if not training backbone
+        if not train_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+        
+        self.num_channels = self.backbone.num_features
+        self.return_interm_layers = return_interm_layers
+        
+        # For ViT, we need to handle intermediate layers differently
+        if return_interm_layers:
+            # Create a dictionary to store intermediate outputs
+            self.intermediate_outputs = {}
+            
+            # Register hooks for transformer blocks
+            def hook_fn(name):
+                def hook(module, input, output):
+                    self.intermediate_outputs[name] = output
+                return hook
+            
+            for i, block in enumerate(self.backbone.blocks):
+                block.register_forward_hook(hook_fn(f'block_{i}'))
+        
+        # Set output shape for the encoder
+        # ViT outputs [batch_size, num_patches + 1, hidden_dim]
+        # We'll use the hidden_dim as the channel dimension
+        self.output_shape = (self.num_channels,)
+    
+    def forward(self, x):
+        # Handle both Tensor and NestedTensor inputs
+        if isinstance(x, NestedTensor):
+            x = x.tensors
+        
+        if x.shape[2] == 128 and x.shape[3] == 128:
+            x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
+        
+        # Reset intermediate outputs if needed
+        if self.return_interm_layers:
+            self.intermediate_outputs.clear()
+        
+        # Forward pass through ViT
+        x = self.backbone.forward_features(x)  # [B, 197, 768]
+        
+        # Remove cls token and reshape to [B, C, H, W]
+        # 197 = 1 (cls token) + 196 (14x14 patches)
+        x = x[:, :1]  # Remove cls token [B, 196, 768]
+        x = x.permute(0, 2, 1)  # [B, 768, 196]
+        x = x.reshape(x.shape[0], x.shape[1], 1, 1)  # [B, 768, 14, 14]
+        
+        # Return intermediate outputs if requested
+        if self.return_interm_layers:
+            return self.intermediate_outputs
+        
+        # Return as OrderedDict to match ResNet format
+        return OrderedDict([("0", x)])
+
+
 class ResNetFilmBackbone(nn.Module):
     def __init__(
         self,
@@ -219,7 +296,17 @@ def build_backbone(
     position_embedding = build_position_encoding(hidden_dim, position_embedding)
     train_backbone = lr_backbone > 0
     return_interm_layers = masks
-    backbone = Backbone(backbone, train_backbone, return_interm_layers, dilation)
+    
+    if backbone == 'vit_base':
+        backbone = ViTBackbone(
+            name='vit_base_patch16_224',
+            train_backbone=train_backbone,
+            return_interm_layers=return_interm_layers,
+            dilation=dilation,
+        )
+    else:
+        backbone = Backbone(backbone, train_backbone, return_interm_layers, dilation)
+    
     model = Joiner(backbone, position_embedding)
     model.num_channels = backbone.num_channels
     return model
