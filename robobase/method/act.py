@@ -3,7 +3,7 @@ from typing_extensions import override
 import torch
 import torch.nn as nn
 import numpy as np
-
+import time
 try:
     from torchvision.transforms import v2 as tvf
 except Exception:
@@ -116,6 +116,8 @@ class ImageEncoderACT(RoboBaseModule):
                 else:
                     self._output_shape = (feat[0].shape, pos[0].shape, None)
 
+        print(self._output_shape)
+
         return self._output_shape
 
     def forward(
@@ -136,10 +138,11 @@ class ImageEncoderACT(RoboBaseModule):
 
             # feat: (b*fs, c, h, w) -> (b*fs, feat_dim, 3, 3)
             # import pdb; pdb.set_trace()
-            if self.use_lang_cond:
-                feat, pos = self.backbone(cur_x, task_emb=task_emb)
-            else:
-                feat, pos = self.backbone(cur_x)
+            with torch.no_grad():
+                if self.use_lang_cond:
+                    feat, pos = self.backbone(cur_x, task_emb=task_emb)
+                else:
+                    feat, pos = self.backbone(cur_x)
 
             # feat: (b*fs, feat_dim, 3, 3) -> (b*fs, hidden_dim, 3, 3)
             feat = self.input_proj(feat[0])
@@ -157,7 +160,6 @@ class ImageEncoderACT(RoboBaseModule):
 
         # (b, pos_feat_dim, 3, 3*v)
         pos = torch.cat(all_cam_pos, axis=3)
-
         return img_feat, pos, task_emb
 
 

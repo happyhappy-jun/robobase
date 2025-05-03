@@ -75,6 +75,7 @@ tb:  # TensorBoard
 experiment_name: exp
 seed: 1
 num_gpus: 1
+gpu_id: 0
 log_every: 1000
 log_train_video: false
 log_eval_video: true

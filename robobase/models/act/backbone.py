@@ -5,6 +5,7 @@ Backbone modules.
 
 import torch
 import torchvision
+import time
 from torch import nn
 from torch.nn import functional as F
 from torchvision.models._utils import IntermediateLayerGetter
@@ -95,6 +96,7 @@ class BackboneBase(nn.Module):
 
     def forward(self, tensor):
         xs = self.body(tensor)
+        # print(xs.shape)
         return xs
         # out: Dict[str, NestedTensor] = {}
         # for name, x in xs.items():
@@ -119,15 +121,75 @@ class Backbone(BackboneBase):
         # When getting backbone
         ssl._create_default_https_context = ssl._create_unverified_context
         backbone = getattr(torchvision.models, name)(
-            replace_stride_with_dilation=[False, False, dilation],
+            # replace_stride_with_dilation=[False, False, dilation],
             pretrained=is_main_process(),
-            norm_layer=FrozenBatchNorm2d,
+            # norm_layer=FrozenBatchNorm2d,
         )  # pretrained # TODO do we want frozen batch_norm??
         num_channels = 512 if name in ("resnet18", "resnet34") else 2048
         super().__init__(backbone, train_backbone, num_channels, return_interm_layers)
 
-
 class ViTBackbone(nn.Module):
+    def __init__(
+        self,
+        name: str,
+        train_backbone: bool,
+        return_interm_layers: bool,
+        dilation: bool,
+    ):
+        super().__init__()
+        # Stops "urllib.error.URLError: ... unable to get local issuer certificate"
+        ssl._create_default_https_context = ssl._create_unverified_context
+        
+        self.backbone = timm.create_model(name, pretrained=is_main_process(), num_classes=0)
+        self.name = name
+        
+        # Freeze parameters if not training backbone
+        if not train_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+        
+        self.num_channels = self.backbone.num_features
+        self.return_interm_layers = return_interm_layers
+        
+        # For ViT, we need to handle intermediate layers differently
+        if return_interm_layers:
+            # Create a dictionary to store intermediate outputs
+            self.intermediate_outputs = {}
+            
+            # Register hooks for transformer blocks
+            def hook_fn(name):
+                def hook(module, input, output):
+                    self.intermediate_outputs[name] = output
+                return hook
+            
+            for i, block in enumerate(self.backbone.blocks):
+                block.register_forward_hook(hook_fn(f'block_{i}'))
+        
+        # Set output shape for the encoder
+        # ViT outputs [batch_size, num_patches + 1, hidden_dim]
+        # We'll use the hidden_dim as the channel dimension
+    
+    @torch.no_grad()
+    def forward(self, x):
+        # Handle both Tensor and NestedTensor inputs
+        if isinstance(x, NestedTensor):
+            x = x.tensors
+        
+        # if x.shape[2] == 128 and x.shape[3] == 128:
+            # if "336" in self.name:
+                # x = F.interpolate(x, size=(336, 336), mode='bilinear', align_corners=False)
+            # else:
+                # x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
+        
+        x = self.backbone.forward_features(x)  # [B, 197, 768]
+        
+        x = x[:, :1, :]  # Take cls token [B, 1, 768]
+        x = x.permute(0, 2, 1)  # [B, 768, 1]
+        x = x.reshape(x.shape[0], x.shape[1], 1, 1)  # [B, 768, 1, 1]
+        
+        return OrderedDict([("0", x)])
+
+class CLIPBackbone(nn.Module):
     def __init__(
         self,
         name: str,
@@ -185,7 +247,8 @@ class ViTBackbone(nn.Module):
             self.intermediate_outputs.clear()
         
         # Forward pass through ViT
-        x = self.backbone.forward_features(x)  # [B, 197, 768]
+        with torch.no_grad():
+            x = self.backbone.forward_features(x)  # [B, 197, 768]
         
         # Remove cls token and reshape to [B, C, H, W]
         # 197 = 1 (cls token) + 196 (14x14 patches)
@@ -199,7 +262,6 @@ class ViTBackbone(nn.Module):
         
         # Return as OrderedDict to match ResNet format
         return OrderedDict([("0", x)])
-
 
 class ResNetFilmBackbone(nn.Module):
     def __init__(
@@ -271,8 +333,12 @@ class ResNetFilmBackbone(nn.Module):
 class Joiner(nn.Sequential):
     def __init__(self, backbone, position_embedding):
         super().__init__(backbone, position_embedding)
+        self._cached_pos = {}  # Cache for position encodings
 
+
+    @torch.no_grad()
     def forward(self, tensor_list: NestedTensor, task_emb: Optional[Any] = None):
+        start_time = time.time()
         if task_emb is not None:
             xs = self[0](tensor_list, task_emb=task_emb)
             # Make a dictionary out of the last layer outputs
@@ -284,8 +350,29 @@ class Joiner(nn.Sequential):
         pos = []
         for name, x in xs.items():
             out.append(x)
-            # position encoding
-            pos.append(self[1](x).to(x.dtype))
+            
+            # Check if position encoding is in cache based on shape
+            tensor_shape = (x.shape[-2], x.shape[-1])
+            device = x.device
+            dtype = x.dtype
+            
+            cache_key = f"{tensor_shape}_{device}_{dtype}"
+            if cache_key not in self._cached_pos:
+                # If not in cache, compute position encoding and cache it
+                pos_encoding = self[1](x).to(x.dtype)
+                self._cached_pos[cache_key] = pos_encoding
+            else:
+                # Retrieve from cache
+                pos_encoding = self._cached_pos[cache_key]
+                
+                # Ensure cached encoding matches batch size
+                if pos_encoding.shape[0] != x.shape[0]:
+                    pos_encoding = pos_encoding[:x.shape[0]]
+            
+            pos.append(pos_encoding)
+
+        end_time = time.time()
+        # print(f"Time taken: {end_time - start_time} seconds")
 
         return out, pos
 
@@ -295,11 +382,19 @@ def build_backbone(
 ):
     position_embedding = build_position_encoding(hidden_dim, position_embedding)
     train_backbone = lr_backbone > 0
+    print("Train backbone: ", train_backbone)
     return_interm_layers = masks
     
     if backbone == 'vit_base':
         backbone = ViTBackbone(
             name='vit_base_patch16_224',
+            train_backbone=train_backbone,
+            return_interm_layers=return_interm_layers,
+            dilation=dilation,
+        )
+    elif backbone == 'clip_vit_l_336':
+        backbone = ViTBackbone(
+            name='vit_large_patch14_clip_336.openai',
             train_backbone=train_backbone,
             return_interm_layers=return_interm_layers,
             dilation=dilation,

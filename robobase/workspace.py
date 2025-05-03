@@ -148,6 +148,8 @@ class Workspace:
                     pass
                 if job_num:
                     dev = job_num % cfg.num_gpus
+        if cfg.gpu_id is not None:
+            dev = cfg.gpu_id
         self.device = torch.device(dev)
 
         # create logger

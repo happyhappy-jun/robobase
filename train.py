@@ -11,6 +11,7 @@ def main(cfg):
 
     root_dir = Path.cwd()
 
+    print(cfg)
     workspace = Workspace(cfg)
 
     snapshot = root_dir / "snapshot.pt"

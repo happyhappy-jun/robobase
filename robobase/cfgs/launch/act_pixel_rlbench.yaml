@@ -5,10 +5,10 @@ defaults:
   - ../method: act
 
 demos: 50
-num_pretrain_steps: 500000
+num_pretrain_steps: 10000
 num_train_frames: 0
-eval_every_steps: 2000
-num_eval_episodes: 10
+eval_every_steps: 500
+num_eval_episodes: 50
 batch_size: 256
 save_snapshot: true
 snapshot_every_n: 0
@@ -31,6 +31,9 @@ update_every_steps: 1
 replay:
   nstep: 1
 
+
+method:
+  lr_backbone: 0
 
 hydra:
   run:
